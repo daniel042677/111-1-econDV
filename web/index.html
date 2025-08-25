@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>支票OCR掃描系統</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/4.1.1/tesseract.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+    <style>
+        body {font-family:'Microsoft JhengHei','PingFang TC',Arial,sans-serif;background:#f5f5f5;margin:0;padding:0;}
+        .container {max-width:960px;margin:0 auto;padding:2rem;}
+        .upload-zone {border:2px dashed #667eea;border-radius:10px;padding:2rem;text-align:center;cursor:pointer;background:#fff;}
+        .btn {padding:0.6rem 1.2rem;border:none;border-radius:8px;cursor:pointer;margin-right:0.5rem;}
+        .btn-primary {background:#667eea;color:#fff;}
+        .btn-success {background:#28a745;color:#fff;}
+        .btn-warning {background:#ffc107;color:#fff;}
+        .file-list{margin-top:1rem;}
+        .file-item{display:flex;justify-content:space-between;padding:0.5rem;background:#fafafa;border-left:4px solid #667eea;margin-bottom:0.3rem;border-radius:4px;}
+        .results-area{display:none;margin-top:2rem;}
+        .progress-container{display:none;margin-top:1rem;}
+        .progress-bar{width:100%;background:#e0e0e0;height:10px;border-radius:5px;overflow:hidden;margin-bottom:0.5rem;}
+        .progress-fill{height:100%;width:0;background:#667eea;transition:width .5s;}
+        .toast{position:fixed;top:20px;right:20px;padding:1rem 1.5rem;border-radius:8px;color:#fff;font-weight:bold;opacity:0;transition:opacity .3s,transform .3s;transform:translateX(200px);}
+        .toast.show{opacity:1;transform:translateX(0);} 
+        .toast.success{background:#28a745;} .toast.error{background:#dc3545;} .toast.warning{background:#ffc107;color:#333;} .toast.info{background:#17a2b8;}
+        table{border-collapse:collapse;width:100%;}
+        th,td{padding:0.5rem;border-bottom:1px solid #ddd;text-align:left;}
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1 style="text-align:center;margin-bottom:1rem;">支票OCR掃描系統</h1>
+    <div class="upload-zone" id="uploadZone">
+        <input type="file" id="fileInput" multiple accept="image/*" style="display:none;" />
+        <i class="fas fa-cloud-upload-alt" style="font-size:3rem;color:#667eea;"></i>
+        <p>拖放或點擊上傳支票圖片 (JPG/PNG)</p>
+    </div>
+    <div style="margin-top:1rem;">
+        <button class="btn btn-primary" id="processBtn" disabled>開始掃描</button>
+        <button class="btn btn-warning" id="clearBtn">清空</button>
+    </div>
+    <div class="progress-container" id="progressContainer">
+        <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+        <div id="progressText">準備中...</div>
+    </div>
+    <div class="file-list" id="fileListContainer" style="display:none;">
+        <div id="fileList"></div>
+    </div>
+    <div class="results-area" id="resultsArea">
+        <button class="btn btn-success" id="downloadBtn" disabled>下載Excel</button>
+        <table style="margin-top:1rem;" id="previewTable">
+            <thead><tr>
+                <th>檔案名稱</th><th>支票號碼</th><th>金額</th><th>受款人</th><th>日期</th><th>銀行</th><th>信心度</th><th>狀態</th>
+            </tr></thead>
+            <tbody id="previewTableBody"></tbody>
+        </table>
+    </div>
+</div>
+<script>
+let uploadedFiles = [];
+let processedResults = [];
+let isProcessing = false;
+let ocrWorker = null;
+const elements = {
+    uploadZone: document.getElementById('uploadZone'),
+    fileInput: document.getElementById('fileInput'),
+    processBtn: document.getElementById('processBtn'),
+    clearBtn: document.getElementById('clearBtn'),
+    progressContainer: document.getElementById('progressContainer'),
+    progressFill: document.getElementById('progressFill'),
+    progressText: document.getElementById('progressText'),
+    fileListContainer: document.getElementById('fileListContainer'),
+    fileList: document.getElementById('fileList'),
+    resultsArea: document.getElementById('resultsArea'),
+    downloadBtn: document.getElementById('downloadBtn'),
+    previewTableBody: document.getElementById('previewTableBody')
+};
+
+document.addEventListener('DOMContentLoaded', () => {
+    initializeEventListeners();
+    initializeOCR();
+});
+
+function initializeEventListeners(){
+    elements.fileInput.addEventListener('change', handleFileSelect);
+    elements.uploadZone.addEventListener('click', () => elements.fileInput.click());
+    elements.uploadZone.addEventListener('dragover', handleDragOver);
+    elements.uploadZone.addEventListener('dragleave', handleDragLeave);
+    elements.uploadZone.addEventListener('drop', handleDrop);
+    elements.processBtn.addEventListener('click', startProcessing);
+    elements.clearBtn.addEventListener('click', clearAll);
+    elements.downloadBtn.addEventListener('click', downloadExcel);
+    ['dragenter','dragover','dragleave','drop'].forEach(eventName => {
+        document.addEventListener(eventName, e => {e.preventDefault(); e.stopPropagation();});
+    });
+}
+
+async function initializeOCR(){
+    try{
+        ocrWorker = await Tesseract.createWorker({
+            logger: m => {
+                if(m.status === 'recognizing text'){
+                    const progress = Math.round(m.progress * 100);
+                    elements.progressText.textContent = 'OCR識別中...'+progress+'%';
+                }
+            }
+        });
+        await ocrWorker.loadLanguage('eng+chi_tra');
+        await ocrWorker.initialize('eng+chi_tra');
+        showToast('OCR引擎初始化完成','success');
+    }catch(err){
+        showToast('OCR引擎初始化失敗: '+err.message,'error');
+        console.error(err);
+    }
+}
+
+function handleDragOver(e){e.preventDefault();elements.uploadZone.classList.add('dragover');}
+function handleDragLeave(e){e.preventDefault();elements.uploadZone.classList.remove('dragover');}
+function handleDrop(e){e.preventDefault();elements.uploadZone.classList.remove('dragover');const files=[...e.dataTransfer.files].filter(f=>f.type.startsWith('image/'));addFiles(files);} 
+function handleFileSelect(e){const files=[...e.target.files];addFiles(files);e.target.value='';}
+
+function addFiles(files){
+    if(!files.length){showToast('請選擇圖片檔案','warning');return;}
+    let added=0;
+    files.forEach(file=>{if(file.type.startsWith('image/')){uploadedFiles.push({id:Date.now()+Math.random(),file,name:file.name,status:'waiting',result:null});added++;}});
+    if(added){updateFileList();updateUI();showToast('已添加 '+added+' 個圖片檔案','success');}
+}
+
+function updateFileList(){
+    if(!uploadedFiles.length){elements.fileListContainer.style.display='none';return;}
+    elements.fileListContainer.style.display='block';
+    elements.fileList.innerHTML='';
+    uploadedFiles.forEach(fileObj=>{
+        const div=document.createElement('div');div.className='file-item';
+        let statusClass='等待中';
+        switch(fileObj.status){case 'processing':statusClass='處理中';break;case 'completed':statusClass='完成';break;case 'error':statusClass='錯誤';break;}
+        div.innerHTML='<span>'+fileObj.name+'</span><span>'+statusClass+'</span>';
+        elements.fileList.appendChild(div);
+    });
+}
+
+async function startProcessing(){
+    if(!uploadedFiles.length){showToast('請先上傳檔案','warning');return;}
+    if(!ocrWorker){showToast('OCR引擎未就緒','error');return;}
+    isProcessing=true;processedResults=[];updateUI();
+    elements.progressContainer.style.display='block';
+    const startTime=Date.now();
+    for(let i=0;i<uploadedFiles.length;i++){
+        const fileObj=uploadedFiles[i];fileObj.status='processing';updateFileList();
+        try{
+            const progress=((i+1)/uploadedFiles.length)*100;
+            updateProgress(progress,`處理中: ${fileObj.name} (${i+1}/${uploadedFiles.length})`);
+            const result=await processImage(fileObj);
+            fileObj.result=result;fileObj.status='completed';
+            processedResults.push({
+                fileName:fileObj.name,
+                chequeNumber:result.chequeNumber,
+                amount:result.amount,
+                payee:result.payee,
+                date:result.date,
+                bank:result.bank,
+                confidence:result.confidence,
+                originalText:result.originalText,
+                error:null
+            });
+        }catch(error){
+            console.error('Processing error:',error);
+            fileObj.status='error';fileObj.result={error:error.message};
+            processedResults.push({fileName:fileObj.name,chequeNumber:null,amount:null,payee:null,date:null,bank:null,confidence:0,originalText:'',error:error.message});
+        }
+        updateFileList();
+    }
+    const processingTime=Math.round((Date.now()-startTime)/1000);
+    updateProgress(100,`處理完成！共處理 ${uploadedFiles.length} 個檔案`);
+    isProcessing=false;updateStats();displayResults();updateUI();
+    const successCount=processedResults.filter(r=>!r.error).length;
+    showToast(`處理完成！成功: ${successCount}個，失敗: ${uploadedFiles.length-successCount}個`,successCount===uploadedFiles.length?'success':'warning');
+}
+
+async function processImage(fileObj){
+    return new Promise((resolve,reject)=>{
+        const reader=new FileReader();
+        reader.onload=async e=>{
+            try{
+                const result=await ocrWorker.recognize(e.target.result);
+                const text=result.data.text;const confidence=result.data.confidence;
+                const parsed=parseCheckData(text);
+                resolve({
+                    originalText:text,
+                    confidence:Math.round(confidence),
+                    chequeNumber:parsed.chequeNumber||'無法識別',
+                    amount:parsed.amount||'無法識別',
+                    payee:parsed.payee||'無法識別',
+                    date:parsed.date||'無法識別',
+                    bank:parsed.bank||'無法識別'
+                });
+            }catch(err){reject(new Error('OCR處理失敗: '+err.message));}
+        };
+        reader.onerror=()=>reject(new Error('檔案讀取失敗'));
+        reader.readAsDataURL(fileObj.file);
+    });
+}
+
+function parseCheckData(text){
+    const result={};
+    const chequeNumberPatterns=[/(?:支票號碼|票號|NO\.?|Number)\s*[:：]?\s*([0-9]{6,})/i,/\b([0-9]{6,})\b/g];
+    for(const pattern of chequeNumberPatterns){
+        const match=text.match(pattern);
+        if(match){
+            if(pattern.global){const nums=match.filter(num=>num.length>=6&&num.length<=10);if(nums.length){result.chequeNumber=nums[0];break;}}
+            else{result.chequeNumber=match[1];break;}
+        }
+    }
+    const amountPatterns=[/NT\$\s*([0-9,]+)/i,/\$\s*([0-9,]+)/,/([0-9,]+)\s*元/,/金額[：:\s]*([0-9,]+)/,/[金額]*[：:\s]*\$?([0-9,]{3,})/];
+    for(const pattern of amountPatterns){const match=text.match(pattern);if(match){result.amount='NT$'+match[1].replace(/,/g,'');break;}}
+    const datePatterns=[/(\d{4}[\/\-年]\d{1,2}[\/\-月]\d{1,2}[日]*)/,/(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{4})/,/(\d{3}[\/\-年]\d{1,2}[\/\-月]\d{1,2}[日]*)/,/日期[：:\s]*(\d{4}[\/\-年]\d{1,2}[\/\-月]\d{1,2}[日]*)/,/(\d{4}年\d{1,2}月\d{1,2}日)/,/(\d{3}年\d{1,2}月\d{1,2}日)/];
+    for(const pattern of datePatterns){const match=text.match(pattern);if(match){result.date=match[1];break;}}
+    const payeePatterns=[/受款人[：:\s]*([^\n\r]{2,20})/,/收款人[：:\s]*([^\n\r]{2,20})/,/付給[：:\s]*([^\n\r]{2,20})/,(?:PAY\s+TO|TO)\s*[:：]?\s*([A-Za-z\s]{2,30})/i,/(?:Mr\.|Mrs\.|Ms\.)\s*([A-Za-z\s]{2,20})/,/([一-龯]{2,6})\s*(?:先生|女士|小姐)/];
+    for(const pattern of payeePatterns){const match=text.match(pattern);if(match){result.payee=match[1].trim();break;}}
+    const bankPatterns=[/([一-龯]*銀行)/,/([A-Za-z\s]*Bank)/i,/(台灣|中華|第一|合作金庫|土地|華南|彰化|上海|台北|高雄|兆豐|農會|郵局|國泰|富邦|中信|玉山|永豐|元大|日盛)/];
+    for(const pattern of bankPatterns){const match=text.match(pattern);if(match){result.bank=match[1];break;}}
+    return result;
+}
+
+function updateProgress(pct,text){elements.progressFill.style.width=pct+'%';elements.progressText.textContent=text;}
+
+function updateStats(){/* simplified stats */}
+
+function displayResults(){
+    if(!processedResults.length)return;elements.resultsArea.style.display='block';elements.downloadBtn.disabled=false;updatePreviewTable();
+}
+
+function updatePreviewTable(){elements.previewTableBody.innerHTML='';processedResults.forEach(res=>{const row=document.createElement('tr');const status=res.error?'錯誤':'成功';row.innerHTML=`<td>${res.fileName}</td><td>${res.chequeNumber||'-'}</td><td>${res.amount||'-'}</td><td>${res.payee||'-'}</td><td>${res.date||'-'}</td><td>${res.bank||'-'}</td><td>${res.confidence||0}%</td><td>${status}</td>`;elements.previewTableBody.appendChild(row);});}
+
+function downloadExcel(){
+    if(!processedResults.length){showToast('沒有可下載的資料','warning');return;}
+    const data=[['檔案名稱','支票號碼','金額','受款人','日期','銀行','信心度','狀態','錯誤訊息']];
+    processedResults.forEach(r=>{data.push([r.fileName,r.chequeNumber||'',r.amount||'',r.payee||'',r.date||'',r.bank||'',(r.confidence||0)+'%',r.error?'處理失敗':'處理成功',r.error||'']);});
+    const wb=XLSX.utils.book_new();const ws=XLSX.utils.aoa_to_sheet(data);XLSX.utils.book_append_sheet(wb,ws,'支票OCR結果');
+    XLSX.writeFile(wb,'支票OCR掃描結果.xlsx');
+    showToast('Excel檔案已下載','success');
+}
+
+function clearAll(){if(isProcessing){showToast('處理中，無法清空','warning');return;}uploadedFiles=[];processedResults=[];elements.fileInput.value='';elements.fileListContainer.style.display='none';elements.progressContainer.style.display='none';elements.resultsArea.style.display='none';updateUI();showToast('已清空所有資料','info');}
+
+function updateUI(){elements.processBtn.disabled=!uploadedFiles.length||isProcessing;elements.clearBtn.disabled=isProcessing;}
+
+function showToast(msg,type){const toast=document.createElement('div');toast.className='toast '+(type||'info');toast.textContent=msg;document.body.appendChild(toast);setTimeout(()=>toast.classList.add('show'),50);setTimeout(()=>{toast.classList.remove('show');setTimeout(()=>document.body.removeChild(toast),300);},3000);} 
+
+window.addEventListener('beforeunload',()=>{if(ocrWorker)ocrWorker.terminate();});
+window.addEventListener('error',e=>{console.error('Global error:',e.error);showToast('系統發生錯誤','error');});
+window.addEventListener('unhandledrejection',e=>{console.error('Unhandled promise rejection:',e.reason);showToast('處理過程中發生錯誤','error');});
+</script>
+</body>
+</html>
